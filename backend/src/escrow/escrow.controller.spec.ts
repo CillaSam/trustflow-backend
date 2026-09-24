@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { EscrowController } from './escrow.controller';
-import { EscrowService } from './escrow.service';
+import { EscrowService, Escrow } from './escrow.service';
 import { WebhookService } from '../webhook/webhook.service';
 import { DiscordService } from '../webhook/discord.service';
 import { ReputationService } from '../reputation/reputation.service';
@@ -10,11 +10,11 @@ import { WebhookEvent } from '../webhook/webhook.dto';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-const DEPOSITOR = 'GDEPOSITOR2222222222222222222222222222222222222222222222';
-const BENEFICIARY = 'GBENEFICIARY22222222222222222222222222222222222222222222';
+const DEPOSITOR = 'GDEPOSITORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const BENEFICIARY = 'GBENEFICIARYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const AMOUNT = '100';
 
-function makeEscrow(overrides: Record<string, any> = {}) {
+function makeEscrow(overrides: Partial<Escrow> = {}): Escrow {
   return {
     id: 'esc-001',
     depositor: DEPOSITOR,
@@ -22,9 +22,6 @@ function makeEscrow(overrides: Record<string, any> = {}) {
     amountXLM: AMOUNT,
     status: 'active',
     createdAt: new Date().toISOString(),
-    disputeReason: undefined as string | undefined,
-    disputedAt: undefined as string | undefined,
-    contractEscrowId: undefined as string | undefined,
     ...overrides,
   };
 }
@@ -172,7 +169,7 @@ describe('EscrowController', () => {
     it('returns an empty array when no escrows exist for the depositor', async () => {
       mocks.escrowService.findByDepositor.mockResolvedValue([]);
 
-      await expect(controller.findByDepositor(DEPOSITOR)).resolves.toEqual([]);
+      expect(await controller.findByDepositor(DEPOSITOR)).toEqual([]);
     });
   });
 
