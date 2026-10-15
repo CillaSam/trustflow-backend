@@ -73,6 +73,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Secret Scanning with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -102,6 +110,10 @@ jobs:
       - name: Circular dependency check
         working-directory: ./backend
         run: npm run check:cycles
+
+      - name: Environment variable audit
+        working-directory: ./backend
+        run: npx tsx scripts/audit-env-vars.ts
 
       # Belt-and-suspenders alongside the service's own --health-cmd/--health-retries above
       # (which gates job startup, not necessarily readiness by the time this step runs):
