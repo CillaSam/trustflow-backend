@@ -3,7 +3,9 @@ import {
   ConflictException,
   BadRequestException,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
 import { SanitizedLogger } from '../common/logging/sanitized-logger';
 import { randomUUID } from 'crypto';
 import { MigrationRegistryService } from './migration-registry.service';
@@ -46,6 +48,7 @@ export class MigrationRunnerService {
   constructor(
     private readonly registry: MigrationRegistryService,
     private readonly store: MigrationStateStore,
+    @Optional() private readonly audit?: AuditService,
   ) {}
 
   async findById(runId: string): Promise<MigrationRun> {
@@ -58,7 +61,7 @@ export class MigrationRunnerService {
     return this.store.findAll();
   }
 
-  async run(name: string, options: RunMigrationOptions = {}): Promise<MigrationRun> {
+  async run(name: string, options: RunMigrationOptions = {}, adminAddress?: string): Promise<MigrationRun> {
     const migration = this.registry.get(name);
 
     const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
@@ -74,6 +77,7 @@ export class MigrationRunnerService {
       progress: { totalRows: 0, processedRows: 0, failedRows: 0, batchSize },
       stepHistory: [],
       dryRun,
+      adminAddress,
       createdAt: now,
       updatedAt: now,
     };
@@ -87,6 +91,15 @@ export class MigrationRunnerService {
       this.logger.log(
         `[DRY-RUN] Would process ${run.progress.totalRows} rows in ${Math.ceil(run.progress.totalRows / batchSize)} batches`,
       );
+      if (this.audit) {
+        await this.audit.logOperation({
+          operation: 'MIGRATION_RUN',
+          user: adminAddress ?? 'system',
+          entityId: run.runId,
+          entityType: 'migration',
+          metadata: { migrationName: name, dryRun: true },
+        });
+      }
       return run;
     }
 
@@ -116,6 +129,15 @@ export class MigrationRunnerService {
       run.completedAt = new Date().toISOString();
       await this.store.save(run);
       await this.store.clearActive(name);
+      if (this.audit) {
+        await this.audit.logOperation({
+          operation: 'MIGRATION_RUN',
+          user: adminAddress ?? 'system',
+          entityId: run.runId,
+          entityType: 'migration',
+          metadata: { migrationName: name, dryRun: false, status: run.status },
+        });
+      }
       this.logger.log(`Migration ${name} (${run.runId}) completed`);
       return run;
     } catch (error) {
@@ -125,7 +147,7 @@ export class MigrationRunnerService {
   }
 
   /** Manually rolls back a run that is no longer in progress (completed or failed). */
-  async rollback(runId: string): Promise<MigrationRun> {
+  async rollback(runId: string, adminAddress?: string): Promise<MigrationRun> {
     const run = await this.findById(runId);
     if (IN_PROGRESS_STATUSES.has(run.status)) {
       throw new ConflictException(`Migration run ${runId} is still in progress (${run.status})`);
@@ -136,6 +158,87 @@ export class MigrationRunnerService {
 
     const migration = this.registry.get(run.migrationName);
     await this.compensate(migration, run, new Error('Manual rollback requested'), true);
+    if (this.audit) {
+      await this.audit.logOperation({
+        operation: 'MIGRATION_ROLLBACK',
+        user: adminAddress ?? 'system',
+        entityId: run.runId,
+        entityType: 'migration',
+        metadata: { migrationName: run.migrationName, rollbackReason: run.rollbackReason },
+      });
+    }
+    return run;
+  }
+
+  /**
+   * Reconciles out-of-band schema changes: marks a migration as COMPLETED in the registry
+   * with a mandatory audit note, preventing conflicting re-runs.
+   */
+  async markApplied(
+    name: string,
+    dto: { reason?: string; justification?: string },
+  ): Promise<MigrationRun> {
+    const auditNote = (dto.reason || dto.justification || '').trim();
+    if (!auditNote) {
+      throw new BadRequestException('A mandatory audit note/justification is required to mark migration as applied');
+    }
+
+    const migration = this.registry.get(name);
+
+    const now = new Date().toISOString();
+    const runId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
+
+    const run: MigrationRun = {
+      runId,
+      migrationName: name,
+      targetTable: migration.targetTable,
+      status: MigrationStatus.COMPLETED,
+      progress: {
+        totalRows: 0,
+        processedRows: 0,
+        failedRows: 0,
+        batchSize: DEFAULT_BATCH_SIZE,
+        startedAt: now,
+        completedAt: now,
+      },
+      stepHistory: [
+        {
+          phase: MigrationPhase.EXPAND,
+          startedAt: now,
+          completedAt: now,
+        },
+        {
+          phase: MigrationPhase.BACKFILL,
+          startedAt: now,
+          completedAt: now,
+        },
+        {
+          phase: MigrationPhase.CONTRACT,
+          startedAt: now,
+          completedAt: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+      auditNote,
+    };
+
+    const claim = await this.store.claimAndCreate(run);
+    if (!claim.claimed) {
+      const existing = claim.activeRunId ? await this.store.findById(claim.activeRunId) : undefined;
+      if (existing && IN_PROGRESS_STATUSES.has(existing.status)) {
+        throw new ConflictException(
+          `Migration "${name}" already has an active run (${existing.runId}, status ${existing.status})`,
+        );
+      }
+      await this.store.markActive(name, run.runId);
+      await this.store.create(run);
+    }
+
+    await this.store.save(run);
+    await this.store.clearActive(name);
+    this.logger.log(`Migration "${name}" (${run.runId}) manually marked as applied: ${auditNote}`);
     return run;
   }
 

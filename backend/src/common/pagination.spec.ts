@@ -1,4 +1,4 @@
-import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, normalizePagination, paginate } from './pagination';
+import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, normalizePagination, paginate, PaginationDto } from './pagination';
 
 const items = Array.from({ length: 250 }, (_, index) => index + 1);
 
@@ -78,6 +78,19 @@ describe('pagination', () => {
 
       expect(result.items).toEqual([]);
       expect(result.total).toBe(items.length);
+    });
+  })    it('clamps pageSize to MAX_PAGE_LIMIT (#913)', () => {
+      expect(normalizePagination({ pageSize: 999999 }).limit).toBe(MAX_PAGE_LIMIT);
+      expect(normalizePagination({ pageSize: 999999 }).pageSize).toBe(MAX_PAGE_LIMIT);
+    });
+
+    it('validates PaginationDto rejecting pageSize > 100 with class-validator (#913)', async () => {
+      const { validate } = await import('class-validator');
+      const dto = new PaginationDto();
+      dto.pageSize = 999999;
+      const errors = await validate(dto);
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].constraints).toHaveProperty('max');
     });
   });
 });
